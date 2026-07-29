@@ -24,7 +24,7 @@ CLEAN_PLATFORMS = ["Tiktok", "IG", "IG reel", "IG Story",
 STATUS_FAIT = "Fait"
 STATUS_FACTURE = "Facture à envoyer"
 GS_EPOCH = pd.Timestamp("1899-12-30")
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 TTL = 600
 MIN_YEAR = 2024
 
@@ -115,18 +115,42 @@ def load_dataframe():
 
 @st.cache_data(ttl=TTL)
 def load_inactifs():
-    """Noms (ou emails) des créateurs partis, listés dans un onglet 'Inactifs'."""
+    """Liste (brute) des créateurs marqués partis, dans l'onglet 'Inactifs'."""
     try:
         ws = _client().open_by_key(SHEET_ID).worksheet("Inactifs")
         vals = ws.col_values(1)
     except Exception:
-        return set()
-    out = set()
+        return []
+    out = []
     for v in vals:
-        s = str(v).strip().lower()
-        if s and s not in ("inactifs", "talent", "talents", "nom", "name"):
-            out.add(s)
+        s = str(v).strip()
+        if s and s.lower() not in ("inactifs", "talent", "talents", "nom", "name"):
+            out.append(s)
     return out
+
+
+def _write_inactifs(names):
+    """Réécrit entièrement l'onglet 'Inactifs' (le crée s'il n'existe pas)."""
+    ss = _client().open_by_key(SHEET_ID)
+    try:
+        ws = ss.worksheet("Inactifs")
+    except Exception:
+        ws = ss.add_worksheet(title="Inactifs", rows=200, cols=1)
+    ws.clear()
+    body = [["Inactifs"]] + [[n] for n in sorted(set(names))]
+    ws.update(range_name="A1", values=body)
+
+
+def apply_inactifs(new_names):
+    """Écrit + vide le cache. Renvoie True si OK, sinon affiche l'erreur."""
+    try:
+        _write_inactifs(new_names)
+    except Exception as e:
+        st.error("Impossible d'écrire dans le Sheet. Il faut le partager en **\u00c9diteur** "
+                 "avec dashboard@grappe-gifting.iam.gserviceaccount.com.\n\nD\u00e9tail : %s" % e)
+        return False
+    st.cache_data.clear()
+    return True
 
 
 def _days_in_year(y):
@@ -174,7 +198,13 @@ def _year_block(scope, y, today):
     monthly["CA"] = monthly["month"].map(dy.groupby("month")["remun"].sum()).fillna(0).round().astype(int)
     monthly["Commission"] = monthly["month"].map(dy.groupby("month")["comm"].sum()).fillna(0).round().astype(int)
 
-    return {"kpi": kpi, "brands": brands, "monthly": monthly}
+    pipe = dy[(dy["status"] != STATUS_FAIT) & (dy["status"] != "")]
+    pipeline = pipe.groupby("status").agg(montant=("remun", "sum"), nb=("remun", "size"))
+    if not pipeline.empty:
+        pipeline["montant"] = pipeline["montant"].round().astype(int)
+        pipeline["nb"] = pipeline["nb"].astype(int)
+
+    return {"kpi": kpi, "brands": brands, "monthly": monthly, "pipeline": pipeline}
 
 
 def _talents(df, scope, years, today):
@@ -206,6 +236,25 @@ def _talents(df, scope, years, today):
     return base.reset_index()
 
 
+def _managers(scope, years):
+    if scope.empty:
+        return pd.DataFrame()
+    mgr = sorted(scope.loc[scope["manager"] != "", "manager"].unique())
+    base = pd.DataFrame(index=mgr)
+    for y in years:
+        dy = scope[scope["year"] == y]
+        base = base.join(dy.groupby("manager")["remun"].sum().rename("ca_%d" % y))
+        base = base.join(dy.groupby("manager")["comm"].sum().rename("comm_%d" % y))
+        base = base.join(dy.groupby("manager").size().rename("camps_%d" % y))
+        base = base.join(dy.groupby("manager")["talent"].nunique().rename("tal_%d" % y))
+    for c in base.columns:
+        if c.startswith(("ca_", "comm_")):
+            base[c] = base[c].fillna(0).round().astype(int)
+        else:
+            base[c] = base[c].fillna(0).astype(int)
+    return base.reset_index().rename(columns={"index": "manager"})
+
+
 @st.cache_data(ttl=TTL, show_spinner="Calcul des agrégats…")
 def compute_all():
     df = load_dataframe()
@@ -225,6 +274,16 @@ def compute_all():
 
     year_data = {y: _year_block(scope, y, today) for y in years}
     talents = _talents(df, scope, years, today)
+    managers = _managers(scope, years)
+
+    bm = scope[(scope["remun"] > 0) & (scope["marque"] != "")]
+    if bm.empty:
+        brand_year = pd.DataFrame()
+        brand_last = pd.Series(dtype="datetime64[ns]")
+    else:
+        brand_year = bm.pivot_table(index="marque", columns="year", values="remun",
+                                    aggfunc="sum", fill_value=0).round().astype(int)
+        brand_last = bm.groupby("marque")["date_vente"].max()
 
     return {
         "updated": pd.Timestamp.now(),
@@ -234,6 +293,9 @@ def compute_all():
         "current_month": int(today.month),
         "year_data": year_data,
         "talents": talents,
+        "managers": managers,
+        "brand_year": brand_year,
+        "brand_last": brand_last,
     }
 
 
@@ -327,9 +389,9 @@ c[2].metric("Taux de commission", f"{k['tauxComm']:.1f} %")
 
 st.divider()
 
-tab_over, tab_comp, tab_brands, tab_talents = st.tabs(
-    ["\U0001F4CA Vue d'ensemble", "\U0001F4C8 Comparaison N / N-1",
-     "\U0001F3F7\uFE0F Marques", "\U0001F9D1\u200D\U0001F3A4 Talents"]
+tab_over, tab_comp, tab_pipe, tab_brands, tab_talents, tab_mgr = st.tabs(
+    ["\U0001F4CA Vue d'ensemble", "\U0001F4C8 Comparaison N / N-1", "\U0001F4BC Pipeline",
+     "\U0001F3F7\uFE0F Marques", "\U0001F9D1\u200D\U0001F3A4 Talents", "\U0001F454 Managers"]
 )
 
 # ------------------------------- Vue d'ensemble ---------------------------- #
@@ -466,19 +528,30 @@ with tab_talents:
         st.info("Aucun talent.")
     else:
         inactifs = load_inactifs()
-        if inactifs:
-            keep = ~(t["name"].str.lower().isin(inactifs) | t["talent"].str.lower().isin(inactifs))
-            t = t[keep]
+        low = {x.lower() for x in inactifs}
+
+        with st.expander("\u2699\uFE0F G\u00e9rer les cr\u00e9ateurs (retirer / r\u00e9activer)"):
+            all_names = sorted(data["talents"]["name"].unique())
+            choix = [n for n in all_names if n.lower() not in low]
+            a_retirer = st.multiselect(
+                "Retirer des cr\u00e9ateurs partis (ils dispara\u00eetront du dashboard)", choix)
+            if st.button("Retirer d\u00e9finitivement", disabled=not a_retirer):
+                if apply_inactifs(set(inactifs) | set(a_retirer)):
+                    st.rerun()
+            if inactifs:
+                a_reactiver = st.multiselect("R\u00e9activer des cr\u00e9ateurs", sorted(inactifs))
+                if st.button("R\u00e9activer", disabled=not a_reactiver):
+                    if apply_inactifs(set(inactifs) - set(a_reactiver)):
+                        st.rerun()
+                st.caption("Actuellement masqu\u00e9s : " + ", ".join(sorted(inactifs)))
+
+        if low:
+            t = t[~(t["name"].str.lower().isin(low) | t["talent"].str.lower().isin(low))]
 
         act = t[t[campsy] > 0].copy()
         if act.empty:
             st.info(f"Aucun talent actif en {year}.")
         else:
-            noms = sorted(act["name"].unique())
-            hide = st.multiselect("Masquer des talents (cette session)", noms)
-            if hide:
-                act = act[~act["name"].isin(hide)]
-
             days = act["days_inactive"].astype(int)
             seuil = int(max(45, np.percentile(days, 75))) if len(days) else 45
 
@@ -510,5 +583,117 @@ with tab_talents:
             st.caption(
                 f"\U0001F534 = pas de collab depuis plus de {seuil} jours "
                 f"(seuil = 75e percentile des délais). "
-                f"Pour retirer définitivement un créateur parti, ajoute son nom dans un "
-                f"onglet « Inactifs » du Google Sheet (une ligne par nom).")
+                f"Pour retirer un créateur parti, utilise le panneau "
+                f"« \u2699\uFE0F G\u00e9rer les cr\u00e9ateurs » ci-dessus.")
+
+
+# ------------------------------- Pipeline ---------------------------------- #
+with tab_pipe:
+    st.subheader(f"Pipeline par statut (en €) — {year}")
+    pl = yd["pipeline"]
+    if pl.empty:
+        st.info("Aucune campagne en cours (hors « Fait »).")
+    else:
+        p = pl.reset_index().sort_values("montant", ascending=False)
+        st.metric("Total en pipeline (hors « Fait »)", eur(int(p["montant"].sum())))
+        st.altair_chart(bar_sorted(p["status"], p["montant"]))
+        st.dataframe(
+            p.rename(columns={"status": "Statut", "montant": "Montant", "nb": "Nb campagnes"}),
+            hide_index=True, width="stretch",
+            column_config={"Montant": st.column_config.NumberColumn(format="%d €")})
+        st.caption("Montant de CA à chaque étape non finalisée : visibilité sur le cash à venir.")
+
+
+# ------------------------------- Managers ---------------------------------- #
+with tab_mgr:
+    st.subheader(f"Performance par Talent Manager — {year}")
+    mg = data["managers"]
+    cay, commy, campsy, taly = f"ca_{year}", f"comm_{year}", f"camps_{year}", f"tal_{year}"
+    if mg.empty or cay not in mg.columns:
+        st.info("Aucune donnée manager.")
+    else:
+        g = mg[mg[campsy] > 0].copy().sort_values(cay, ascending=False)
+        if g.empty:
+            st.info(f"Aucun manager actif en {year}.")
+        else:
+            prev_ca = f"ca_{year - 1}"
+            if prev_ca in g.columns:
+                g["Évol. CA %"] = pct(g[cay].values, g[prev_ca].values)
+            st.altair_chart(bar_sorted(g["manager"], g[cay]))
+            cols = ["manager", cay, commy, campsy, taly]
+            cfg = {"manager": "Manager",
+                   cay: st.column_config.NumberColumn(f"CA {year}", format="%d €"),
+                   commy: st.column_config.NumberColumn("Commission", format="%d €"),
+                   campsy: "Campagnes", taly: "Talents"}
+            if "Évol. CA %" in g.columns:
+                cols.append("Évol. CA %")
+                cfg["Évol. CA %"] = st.column_config.NumberColumn(format="%+d%%")
+            st.dataframe(g[cols], hide_index=True, width="stretch", column_config=cfg)
+
+
+# --------------------- Marques : dormantes + nouvelles --------------------- #
+with tab_brands:
+    by = data["brand_year"]
+    bl = data["brand_last"]
+
+    st.divider()
+    st.subheader("\U0001F634 Marques à relancer (dormantes)")
+    if by.empty or year not in by.columns:
+        st.info("Pas assez d'historique.")
+    else:
+        prior = [c for c in by.columns if c < year]
+        if not prior:
+            st.info(f"Pas d'année avant {year} pour comparer.")
+        else:
+            active_before = by[prior].sum(axis=1) > 0
+            dormant = by[active_before & (by[year] == 0)]
+            if dormant.empty:
+                st.success("Aucune marque dormante 🎉")
+            else:
+                rows = []
+                for marque in dormant.index:
+                    last_y = max([y2 for y2 in prior if by.loc[marque, y2] > 0])
+                    rows.append({"Marque": marque,
+                                 "Dernier budget": int(by.loc[marque, last_y]),
+                                 "Dernière année": int(last_y),
+                                 "Dernière campagne": bl.get(marque)})
+                d = pd.DataFrame(rows).sort_values("Dernier budget", ascending=False)
+                st.caption(f"Actives avant {year}, mais aucune campagne en {year}. "
+                           f"Idéal à brancher sur ton outil de relance e-mail.")
+                st.dataframe(
+                    d, hide_index=True, width="stretch",
+                    column_config={
+                        "Dernier budget": st.column_config.NumberColumn(format="%d €"),
+                        "Dernière campagne": st.column_config.DateColumn(format="DD/MM/YYYY")})
+
+    st.divider()
+    st.subheader("\U0001F195 Nouvelles marques vs récurrentes")
+    if by.empty or year not in by.columns:
+        st.info("Pas de données.")
+    else:
+        prior = [c for c in by.columns if c < year]
+        now = by[by[year] > 0]
+        if now.empty:
+            st.info(f"Aucune marque en {year}.")
+        elif not prior:
+            st.caption(f"Pas d'historique avant {year} : impossible de distinguer "
+                       f"nouvelles et récurrentes cette année-là.")
+        else:
+            prior_sum = by[prior].sum(axis=1)
+            new_mask = np.array([prior_sum.get(mq, 0) == 0 for mq in now.index])
+            nb_new = int(new_mask.sum())
+            nb_rec = int(len(now) - nb_new)
+            ca_new = int(now[year].values[new_mask].sum())
+            ca_rec = int(now[year].sum() - ca_new)
+            cc = st.columns(4)
+            cc[0].metric("Nouvelles marques", f"{nb_new}")
+            cc[1].metric("CA nouvelles", eur(ca_new))
+            cc[2].metric("Marques récurrentes", f"{nb_rec}")
+            cc[3].metric("CA récurrentes", eur(ca_rec))
+            new_list = now[new_mask].sort_values(year, ascending=False)
+            if not new_list.empty:
+                nl = pd.DataFrame({"Marque": new_list.index,
+                                   f"CA {year}": new_list[year].astype(int)})
+                st.caption("Nouvelles marques acquises cette année :")
+                st.dataframe(nl, hide_index=True, width="stretch",
+                             column_config={f"CA {year}": st.column_config.NumberColumn(format="%d €")})
