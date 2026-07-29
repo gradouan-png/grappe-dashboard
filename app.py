@@ -366,13 +366,59 @@ if data is None:
 years = data["years"]
 with st.sidebar:
     year = st.radio("Année", sorted(years, reverse=True), index=0)
-    st.divider()
-    code_in = st.text_input("Code d'accès (données €)", type="password")
-    full = (code_in == MANAGER_CODE) if MANAGER_CODE else True
-    st.caption("🔓 Vue complète" if full else "🔒 Vue restreinte (sans €)")
+
+# --- Accès données financières : champ masqué, révélé par Cmd/Ctrl + D ---
+if "full" not in st.session_state:
+    st.session_state.full = (not MANAGER_CODE)
+
+import streamlit.components.v1 as components
+components.html(
+    """
+    <script>
+    const doc = window.parent.document;
+    if (!doc.__grapperUnlock) {
+        doc.__grapperUnlock = true;
+        doc.addEventListener('keydown', function(e){
+            if ((e.metaKey || e.ctrlKey) && (e.key === 'd' || e.key === 'D')) {
+                e.preventDefault();
+                const u = new URL(window.parent.location.href);
+                u.searchParams.set('unlock', '1');
+                window.parent.location.href = u.toString();
+            }
+        });
+    }
+    </script>
+    """, height=0)
+
+
+@st.dialog("Accès données financières")
+def _unlock():
+    st.write("Saisis le code pour afficher les données financières.")
+    code_in = st.text_input("Code", type="password")
+    col1, col2 = st.columns(2)
+    if col1.button("Déverrouiller", width="stretch"):
+        if MANAGER_CODE and code_in == MANAGER_CODE:
+            st.session_state.full = True
+            st.query_params.clear()
+            st.rerun()
+        else:
+            st.error("Code incorrect.")
+    if col2.button("Annuler", width="stretch"):
+        st.query_params.clear()
+        st.rerun()
+
+
+if "unlock" in st.query_params and not st.session_state.full:
+    _unlock()
+
+full = st.session_state.full
+with st.sidebar:
+    st.caption("🔓 Vue complète" if full else "🔒 Vue restreinte")
+    if full and MANAGER_CODE and st.button("🔒 Verrouiller", width="stretch"):
+        st.session_state.full = False
+        st.rerun()
     if not MANAGER_CODE:
-        st.caption("⚠️ Aucun code configuré. Ajoute [access] / code dans les Secrets "
-                   "pour activer la vue restreinte.")
+        st.caption("⚠️ Configure [access] / code dans les Secrets.")
 
 yd = data["year_data"][year]
 prevd = data["year_data"].get(year - 1)
