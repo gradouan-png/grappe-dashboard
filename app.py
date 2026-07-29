@@ -427,10 +427,15 @@ if "unlock" in st.query_params and not st.session_state.full:
 
 full = st.session_state.full
 with st.sidebar:
+    st.divider()
     st.caption("🔓 Vue complète" if full else "🔒 Vue restreinte")
-    if full and MANAGER_CODE and st.button("🔒 Verrouiller", width="stretch"):
-        st.session_state.full = False
-        st.rerun()
+    if not full:
+        if st.button("🔒 Accès", width="stretch"):
+            _unlock()
+    elif MANAGER_CODE:
+        if st.button("Verrouiller", width="stretch"):
+            st.session_state.full = False
+            st.rerun()
     if not MANAGER_CODE:
         st.caption("⚠️ Configure [access] / code dans les Secrets.")
 
