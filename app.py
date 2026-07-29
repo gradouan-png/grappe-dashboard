@@ -197,6 +197,8 @@ def _year_block(scope, y, today):
     monthly = pd.DataFrame({"month": range(1, 13)})
     monthly["CA"] = monthly["month"].map(dy.groupby("month")["remun"].sum()).fillna(0).round().astype(int)
     monthly["Commission"] = monthly["month"].map(dy.groupby("month")["comm"].sum()).fillna(0).round().astype(int)
+    monthly["Campagnes"] = monthly["month"].map(dy.groupby("month").size()).fillna(0).astype(int)
+    monthly["Nb"] = monthly["month"].map(dy.groupby("month").size()).fillna(0).astype(int)
 
     pipe = dy[(dy["status"] != STATUS_FAIT) & (dy["status"] != "")]
     pipeline = pipe.groupby("status").agg(montant=("remun", "sum"), nb=("remun", "size"))
@@ -275,6 +277,7 @@ def compute_all():
     year_data = {y: _year_block(scope, y, today) for y in years}
     talents = _talents(df, scope, years, today)
     managers = _managers(scope, years)
+    vnf_global = int(round(df.loc[df["status"] != STATUS_FAIT, "remun"].sum()))
 
     bm = scope[(scope["remun"] > 0) & (scope["marque"] != "")]
     if bm.empty:
@@ -294,6 +297,7 @@ def compute_all():
         "year_data": year_data,
         "talents": talents,
         "managers": managers,
+        "vnf_global": vnf_global,
         "brand_year": brand_year,
         "brand_last": brand_last,
     }
@@ -319,8 +323,7 @@ def bar_sorted(labels, values, ytitle="€", height=340):
     d = pd.DataFrame({"cat": list(labels), "val": list(values)})
     return alt.Chart(d).mark_bar().encode(
         x=alt.X("cat:N", sort="-y", title=None),
-        y=alt.Y("val:Q", title=ytitle),
-        tooltip=["cat", "val"],
+        y=alt.Y("val:Q", title=ytitle), tooltip=["cat", "val"],
     ).properties(height=height, width="container")
 
 
@@ -330,17 +333,28 @@ def monthly_chart(mdf):
     long = mdf.melt(id_vars=["Mois"], value_vars=["CA", "Commission"],
                     var_name="Type", value_name="Montant")
     return alt.Chart(long).mark_bar().encode(
-        x=alt.X("Mois:N", sort=MONTHS_FR, title=None),
-        xOffset="Type:N",
-        y=alt.Y("Montant:Q", title="€"),
-        color=alt.Color("Type:N", title=None),
-        tooltip=["Mois", "Type", "Montant"],
-    ).properties(height=380, width="container")
+        x=alt.X("Mois:N", sort=MONTHS_FR, title=None), xOffset="Type:N",
+        y=alt.Y("Montant:Q", title="€"), color=alt.Color("Type:N", title=None),
+        tooltip=["Mois", "Type", "Montant"]).properties(height=380, width="container")
 
+
+def month_bar(mdf, col, ytitle):
+    d = mdf.copy()
+    d["Mois"] = [MONTHS_FR[i - 1] for i in d["month"]]
+    return alt.Chart(d).mark_bar().encode(
+        x=alt.X("Mois:N", sort=MONTHS_FR, title=None),
+        y=alt.Y(col + ":Q", title=ytitle), tooltip=["Mois", col],
+    ).properties(height=360, width="container")
+
+
+try:
+    MANAGER_CODE = str(st.secrets["access"]["code"])
+except Exception:
+    MANAGER_CODE = ""
 
 with st.sidebar:
-    st.title("\U0001F4CA Grapper")
-    if st.button("\U0001F504 Rafraîchir les données", width="stretch"):
+    st.title("📊 Grapper")
+    if st.button("🔄 Rafraîchir les données", width="stretch"):
         st.cache_data.clear()
         st.rerun()
 
@@ -352,6 +366,13 @@ if data is None:
 years = data["years"]
 with st.sidebar:
     year = st.radio("Année", sorted(years, reverse=True), index=0)
+    st.divider()
+    code_in = st.text_input("Code d'accès (données €)", type="password")
+    full = (code_in == MANAGER_CODE) if MANAGER_CODE else True
+    st.caption("🔓 Vue complète" if full else "🔒 Vue restreinte (sans €)")
+    if not MANAGER_CODE:
+        st.caption("⚠️ Aucun code configuré. Ajoute [access] / code dans les Secrets "
+                   "pour activer la vue restreinte.")
 
 yd = data["year_data"][year]
 prevd = data["year_data"].get(year - 1)
@@ -370,123 +391,157 @@ def dn(key):
     return f"{k[key] - kprev[key]:+d}" if kprev else None
 
 
-c = st.columns(4)
-c[0].metric("CA total", eur(k["totalCA"]), dm("totalCA"))
-c[1].metric("Commission", eur(k["totalComm"]), dm("totalComm"))
-c[2].metric("Campagnes vendues", f"{k['count']}", dn("count"))
-c[3].metric("En cours (actives)", f"{k['actives']}")
-
-c = st.columns(4)
-c[0].metric("Vendu non facturé", eur(k["venduNonFacture"]))
-c[1].metric("Prix moyen / campagne", eur(k["caMoyen"]))
-c[2].metric("Factures à envoyer", f"{k['facturesAEnvoyer']}")
-c[3].metric("Talents actifs", f"{k['nbTalents']}")
-
-c = st.columns(3)
-c[0].metric("Campagnes / mois", f"{k['campsPerMonth']:.1f}")
-c[1].metric("Campagnes / jour", f"{k['campsPerDay']:.2f}")
-c[2].metric("Taux de commission", f"{k['tauxComm']:.1f} %")
+if full:
+    c = st.columns(4)
+    c[0].metric("CA total", eur(k["totalCA"]), dm("totalCA"))
+    c[1].metric("Commission", eur(k["totalComm"]), dm("totalComm"))
+    c[2].metric("Campagnes vendues", f"{k['count']}", dn("count"))
+    c[3].metric("En cours (actives)", f"{k['actives']}")
+    c = st.columns(4)
+    c[0].metric("Vendu non facturé (global)", eur(data["vnf_global"]))
+    c[1].metric("Prix moyen / campagne", eur(k["caMoyen"]))
+    c[2].metric("Factures à envoyer", f"{k['facturesAEnvoyer']}")
+    c[3].metric("Talents actifs", f"{k['nbTalents']}")
+    c = st.columns(3)
+    c[0].metric("Campagnes / mois", f"{k['campsPerMonth']:.1f}")
+    c[1].metric("Campagnes / jour", f"{k['campsPerDay']:.2f}")
+    c[2].metric("Taux de commission", f"{k['tauxComm']:.1f} %")
+else:
+    c = st.columns(4)
+    c[0].metric("Campagnes vendues", f"{k['count']}", dn("count"))
+    c[1].metric("En cours (actives)", f"{k['actives']}")
+    c[2].metric("Factures à envoyer", f"{k['facturesAEnvoyer']}")
+    c[3].metric("Talents actifs", f"{k['nbTalents']}")
+    c = st.columns(2)
+    c[0].metric("Campagnes / mois", f"{k['campsPerMonth']:.1f}")
+    c[1].metric("Campagnes / jour", f"{k['campsPerDay']:.2f}")
 
 st.divider()
 
 tab_over, tab_comp, tab_pipe, tab_brands, tab_talents, tab_mgr = st.tabs(
-    ["\U0001F4CA Vue d'ensemble", "\U0001F4C8 Comparaison N / N-1", "\U0001F4BC Pipeline",
-     "\U0001F3F7\uFE0F Marques", "\U0001F9D1\u200D\U0001F3A4 Talents", "\U0001F454 Managers"]
-)
+    ["📊 Vue d'ensemble", "📈 Comparaison N / N-1", "💼 Pipeline",
+     "🏷️ Marques", "🧑‍🎤 Talents", "👔 Managers"])
 
-# ------------------------------- Vue d'ensemble ---------------------------- #
 with tab_over:
-    st.subheader(f"CA & commission par mois — {year}")
-    st.altair_chart(monthly_chart(yd["monthly"]))
+    if full:
+        st.subheader(f"CA & commission par mois — {year}")
+        st.altair_chart(monthly_chart(yd["monthly"]))
+        tab = yd["monthly"].copy()
+        tab["Mois"] = [MONTHS_FR[i - 1] for i in tab["month"]]
+        tab["Cumul CA"] = tab["CA"].cumsum()
+        tab["Cumul Comm"] = tab["Commission"].cumsum()
+        disp = tab[["Mois", "CA", "Commission", "Cumul CA", "Cumul Comm"]]
+        total = pd.DataFrame([{"Mois": "TOTAL", "CA": int(tab["CA"].sum()),
+                               "Commission": int(tab["Commission"].sum()),
+                               "Cumul CA": int(tab["CA"].sum()),
+                               "Cumul Comm": int(tab["Commission"].sum())}])
+        disp = pd.concat([disp, total], ignore_index=True)
+        eurc = st.column_config.NumberColumn(format="%d €")
+        st.dataframe(disp, hide_index=True, width="stretch",
+                     column_config={"CA": eurc, "Commission": eurc,
+                                    "Cumul CA": eurc, "Cumul Comm": eurc})
+    else:
+        st.subheader(f"Campagnes par mois — {year}")
+        st.altair_chart(month_bar(yd["monthly"], "Campagnes", "Campagnes"))
+        tab = yd["monthly"].copy()
+        tab["Mois"] = [MONTHS_FR[i - 1] for i in tab["month"]]
+        disp = tab[["Mois", "Campagnes"]]
+        total = pd.DataFrame([{"Mois": "TOTAL", "Campagnes": int(tab["Campagnes"].sum())}])
+        st.dataframe(pd.concat([disp, total], ignore_index=True), hide_index=True, width="stretch")
 
-    tab = yd["monthly"].copy()
-    tab["Mois"] = [MONTHS_FR[i - 1] for i in tab["month"]]
-    tab["Cumul CA"] = tab["CA"].cumsum()
-    tab["Cumul Comm"] = tab["Commission"].cumsum()
-    disp = tab[["Mois", "CA", "Commission", "Cumul CA", "Cumul Comm"]]
-    total = pd.DataFrame([{"Mois": "TOTAL", "CA": int(tab["CA"].sum()),
-                           "Commission": int(tab["Commission"].sum()),
-                           "Cumul CA": int(tab["CA"].sum()),
-                           "Cumul Comm": int(tab["Commission"].sum())}])
-    disp = pd.concat([disp, total], ignore_index=True)
-    eurc = st.column_config.NumberColumn(format="%d €")
-    st.dataframe(disp, hide_index=True, width="stretch",
-                 column_config={"CA": eurc, "Commission": eurc,
-                                "Cumul CA": eurc, "Cumul Comm": eurc})
-
-# ------------------------------- Comparaison ------------------------------- #
 with tab_comp:
     if not prevd:
         st.subheader(f"{year} vs {year - 1}")
         st.info(f"Pas de données pour {year - 1}.")
     else:
         cur, prv = yd["monthly"], prevd["monthly"]
+        if full:
+            if year == data["current_year"]:
+                mm = data["current_month"]
+                mth = MONTHS_FR[mm - 1]
+                cur_ca = float(cur["CA"].iloc[:mm].sum())
+                prev_ca = float(prv["CA"].iloc[:mm].sum())
+                prev_ca_full = float(prv["CA"].sum())
+                cur_co = float(cur["Commission"].iloc[:mm].sum())
+                prev_co = float(prv["Commission"].iloc[:mm].sum())
+                prev_co_full = float(prv["Commission"].sum())
+                share_ca = prev_ca / prev_ca_full if prev_ca_full else 0
+                share_co = prev_co / prev_co_full if prev_co_full else 0
+                est_ca = cur_ca / share_ca if share_ca > 0 else None
+                est_co = cur_co / share_co if share_co > 0 else None
 
-        if year == data["current_year"]:
-            m = data["current_month"]
-            mth = MONTHS_FR[m - 1]
-            cur_ca = float(cur["CA"].iloc[:m].sum())
-            prev_ca = float(prv["CA"].iloc[:m].sum())
-            prev_ca_full = float(prv["CA"].sum())
-            cur_co = float(cur["Commission"].iloc[:m].sum())
-            prev_co = float(prv["Commission"].iloc[:m].sum())
-            prev_co_full = float(prv["Commission"].sum())
-            share_ca = prev_ca / prev_ca_full if prev_ca_full else 0
-            share_co = prev_co / prev_co_full if prev_co_full else 0
-            est_ca = cur_ca / share_ca if share_ca > 0 else None
-            est_co = cur_co / share_co if share_co > 0 else None
+                def gpct(a, b):
+                    return f"{(a - b) / b * 100:+.0f}% vs {year - 1}" if (b and a is not None) else "—"
 
-            def gpct(a, b):
-                return f"{(a - b) / b * 100:+.0f}% vs {year - 1}" if (b and a is not None) else "—"
-
-            st.subheader(f"\U0001F52E Estimation fin {year}")
-            cc = st.columns(3)
-            cc[0].metric(f"CA cumulé (Jan→{mth})", eur(cur_ca), gpct(cur_ca, prev_ca))
-            cc[1].metric(f"Estimation CA {year}",
-                         eur(est_ca) if est_ca is not None else "—",
-                         gpct(est_ca, prev_ca_full) if est_ca is not None else None)
-            cc[2].metric(f"Estimation Commission {year}",
-                         eur(est_co) if est_co is not None else "—",
-                         gpct(est_co, prev_co_full) if est_co is not None else None)
-            st.caption(
-                f"Projection basée sur la saisonnalité de {year - 1} : la part du CA "
-                f"réalisée de janvier à {mth} l'an dernier est appliquée au cumul de {year}.")
-            st.divider()
-
-        st.subheader(f"{year} vs {year - 1} — mois par mois")
-        comp = pd.DataFrame({"Mois": MONTHS_FR})
-        comp[f"CA {year}"] = cur["CA"].values
-        comp[f"CA {year - 1}"] = prv["CA"].values
-        comp["Δ CA"] = comp[f"CA {year}"] - comp[f"CA {year - 1}"]
-        comp["Δ CA %"] = pct(cur["CA"].values, prv["CA"].values)
-        comp[f"Comm {year}"] = cur["Commission"].values
-        comp[f"Comm {year - 1}"] = prv["Commission"].values
-        comp["Δ Comm"] = comp[f"Comm {year}"] - comp[f"Comm {year - 1}"]
-
-        cmp_long = pd.DataFrame({
-            "Mois": MONTHS_FR * 2,
-            "Année": [str(year)] * 12 + [str(year - 1)] * 12,
-            "CA": list(cur["CA"].values) + list(prv["CA"].values)})
-        st.altair_chart(alt.Chart(cmp_long).mark_bar().encode(
-            x=alt.X("Mois:N", sort=MONTHS_FR, title=None),
-            xOffset="Année:N",
-            y=alt.Y("CA:Q", title="€"),
-            color=alt.Color("Année:N", title=None),
-            tooltip=["Mois", "Année", "CA"]).properties(height=340, width="container"))
-
-        eurc = st.column_config.NumberColumn(format="%d €")
-        st.dataframe(
-            comp, hide_index=True, width="stretch",
-            column_config={
+                st.subheader(f"🔮 Estimation fin {year}")
+                cc = st.columns(3)
+                cc[0].metric(f"CA cumulé (Jan→{mth})", eur(cur_ca), gpct(cur_ca, prev_ca))
+                cc[1].metric(f"Estimation CA {year}", eur(est_ca) if est_ca is not None else "—",
+                             gpct(est_ca, prev_ca_full) if est_ca is not None else None)
+                cc[2].metric(f"Estimation Commission {year}", eur(est_co) if est_co is not None else "—",
+                             gpct(est_co, prev_co_full) if est_co is not None else None)
+                st.caption(f"Projection basée sur la saisonnalité de {year - 1}.")
+                st.divider()
+            st.subheader(f"{year} vs {year - 1} — mois par mois")
+            comp = pd.DataFrame({"Mois": MONTHS_FR})
+            comp[f"CA {year}"] = cur["CA"].values
+            comp[f"CA {year - 1}"] = prv["CA"].values
+            comp["Δ CA"] = comp[f"CA {year}"] - comp[f"CA {year - 1}"]
+            comp["Δ CA %"] = pct(cur["CA"].values, prv["CA"].values)
+            comp[f"Comm {year}"] = cur["Commission"].values
+            comp[f"Comm {year - 1}"] = prv["Commission"].values
+            comp["Δ Comm"] = comp[f"Comm {year}"] - comp[f"Comm {year - 1}"]
+            cmp_long = pd.DataFrame({"Mois": MONTHS_FR * 2,
+                                     "Année": [str(year)] * 12 + [str(year - 1)] * 12,
+                                     "CA": list(cur["CA"].values) + list(prv["CA"].values)})
+            st.altair_chart(alt.Chart(cmp_long).mark_bar().encode(
+                x=alt.X("Mois:N", sort=MONTHS_FR, title=None), xOffset="Année:N",
+                y=alt.Y("CA:Q", title="€"), color=alt.Color("Année:N", title=None),
+                tooltip=["Mois", "Année", "CA"]).properties(height=340, width="container"))
+            eurc = st.column_config.NumberColumn(format="%d €")
+            st.dataframe(comp, hide_index=True, width="stretch", column_config={
                 f"CA {year}": eurc, f"CA {year - 1}": eurc, "Δ CA": eurc,
                 "Δ CA %": st.column_config.NumberColumn(format="%+d%%"),
-                f"Comm {year}": eurc, f"Comm {year - 1}": eurc, "Δ Comm": eurc,
-            })
+                f"Comm {year}": eurc, f"Comm {year - 1}": eurc, "Δ Comm": eurc})
+        else:
+            st.subheader(f"Campagnes {year} vs {year - 1} — mois par mois")
+            comp = pd.DataFrame({"Mois": MONTHS_FR})
+            comp[f"Camp. {year}"] = cur["Campagnes"].values
+            comp[f"Camp. {year - 1}"] = prv["Campagnes"].values
+            comp["Δ"] = comp[f"Camp. {year}"] - comp[f"Camp. {year - 1}"]
+            cmp_long = pd.DataFrame({"Mois": MONTHS_FR * 2,
+                                     "Année": [str(year)] * 12 + [str(year - 1)] * 12,
+                                     "Campagnes": list(cur["Campagnes"].values) + list(prv["Campagnes"].values)})
+            st.altair_chart(alt.Chart(cmp_long).mark_bar().encode(
+                x=alt.X("Mois:N", sort=MONTHS_FR, title=None), xOffset="Année:N",
+                y=alt.Y("Campagnes:Q"), color=alt.Color("Année:N", title=None),
+                tooltip=["Mois", "Année", "Campagnes"]).properties(height=340, width="container"))
+            st.dataframe(comp, hide_index=True, width="stretch")
 
-# ------------------------------- Marques ----------------------------------- #
+with tab_pipe:
+    pl = yd["pipeline"]
+    if pl.empty:
+        st.subheader(f"Pipeline — {year}")
+        st.info("Aucune campagne en cours (hors « Fait »).")
+    else:
+        p = pl.reset_index().sort_values("montant" if full else "nb", ascending=False)
+        if full:
+            st.subheader(f"Pipeline par statut (en €) — {year}")
+            st.metric("Total en pipeline (hors « Fait »)", eur(int(p["montant"].sum())))
+            st.altair_chart(bar_sorted(p["status"], p["montant"]))
+            st.dataframe(p.rename(columns={"status": "Statut", "montant": "Montant", "nb": "Nb campagnes"}),
+                         hide_index=True, width="stretch",
+                         column_config={"Montant": st.column_config.NumberColumn(format="%d €")})
+        else:
+            st.subheader(f"Pipeline par statut (nb campagnes) — {year}")
+            st.metric("Campagnes en cours (hors « Fait »)", f"{int(p['nb'].sum())}")
+            st.altair_chart(bar_sorted(p["status"], p["nb"], ytitle="Campagnes"))
+            st.dataframe(p[["status", "nb"]].rename(columns={"status": "Statut", "nb": "Nb campagnes"}),
+                         hide_index=True, width="stretch")
+
 with tab_brands:
-    st.subheader(f"Marques — {year} vs {year - 1}")
     cur = yd["brands"]
+    st.subheader(f"Marques — {year} vs {year - 1}")
     if cur.empty:
         st.info("Aucune marque pour cette année.")
     else:
@@ -504,22 +559,93 @@ with tab_brands:
         m["Dernière campagne"] = cur["derniere"]
         m = m.reset_index().sort_values(f"Budget {year}", ascending=False)
         show = m.head(40)
-
         eurc = st.column_config.NumberColumn(format="%d €")
-        st.dataframe(
-            show[["marque", f"Budget {year}", f"Budget {year - 1}", "Évol. %",
-                  f"Camp. {year}", f"Camp. {year - 1}", "Dernière campagne"]],
-            hide_index=True, width="stretch",
-            column_config={
-                "marque": "Marque",
-                f"Budget {year}": eurc, f"Budget {year - 1}": eurc,
-                "Évol. %": st.column_config.NumberColumn(format="%+d%%"),
-                "Dernière campagne": st.column_config.DateColumn(format="DD/MM/YYYY"),
-            })
-        st.caption("Clique un en-tête de colonne pour trier (croissant ↔ décroissant).")
-        st.altair_chart(bar_sorted(show["marque"].head(20), show[f"Budget {year}"].head(20)))
+        if full:
+            st.dataframe(show[["marque", f"Budget {year}", f"Budget {year - 1}", "Évol. %",
+                               f"Camp. {year}", f"Camp. {year - 1}", "Dernière campagne"]],
+                         hide_index=True, width="stretch", column_config={
+                             "marque": "Marque", f"Budget {year}": eurc, f"Budget {year - 1}": eurc,
+                             "Évol. %": st.column_config.NumberColumn(format="%+d%%"),
+                             "Dernière campagne": st.column_config.DateColumn(format="DD/MM/YYYY")})
+            st.altair_chart(bar_sorted(show["marque"].head(20), show[f"Budget {year}"].head(20)))
+        else:
+            sc = show.sort_values(f"Camp. {year}", ascending=False)
+            st.dataframe(sc[["marque", f"Camp. {year}", f"Camp. {year - 1}", "Dernière campagne"]],
+                         hide_index=True, width="stretch", column_config={
+                             "marque": "Marque",
+                             "Dernière campagne": st.column_config.DateColumn(format="DD/MM/YYYY")})
+            st.altair_chart(bar_sorted(sc["marque"].head(20), sc[f"Camp. {year}"].head(20), ytitle="Campagnes"))
+        st.caption("Clique un en-tête de colonne pour trier.")
 
-# ------------------------------- Talents ----------------------------------- #
+    by = data["brand_year"]
+    bl = data["brand_last"]
+    st.divider()
+    st.subheader("😴 Marques à relancer (dormantes)")
+    if by.empty or year not in by.columns:
+        st.info("Pas assez d'historique.")
+    else:
+        prior = [c for c in by.columns if c < year]
+        if not prior:
+            st.info(f"Pas d'année avant {year} pour comparer.")
+        else:
+            dormant = by[(by[prior].sum(axis=1) > 0) & (by[year] == 0)]
+            if dormant.empty:
+                st.success("Aucune marque dormante 🎉")
+            else:
+                rows = []
+                for marque in dormant.index:
+                    last_y = max([y2 for y2 in prior if by.loc[marque, y2] > 0])
+                    rows.append({"Marque": marque, "Dernier budget": int(by.loc[marque, last_y]),
+                                 "Dernière année": int(last_y), "Dernière campagne": bl.get(marque)})
+                d = pd.DataFrame(rows).sort_values("Dernier budget", ascending=False)
+                st.caption(f"Actives avant {year}, aucune campagne en {year}.")
+                if full:
+                    st.dataframe(d, hide_index=True, width="stretch", column_config={
+                        "Dernier budget": st.column_config.NumberColumn(format="%d €"),
+                        "Dernière campagne": st.column_config.DateColumn(format="DD/MM/YYYY")})
+                else:
+                    st.dataframe(d[["Marque", "Dernière année", "Dernière campagne"]].sort_values(
+                        "Dernière année", ascending=False), hide_index=True, width="stretch",
+                        column_config={"Dernière campagne": st.column_config.DateColumn(format="DD/MM/YYYY")})
+
+    st.divider()
+    st.subheader("🆕 Nouvelles marques vs récurrentes")
+    if by.empty or year not in by.columns:
+        st.info("Pas de données.")
+    else:
+        prior = [c for c in by.columns if c < year]
+        now = by[by[year] > 0]
+        if now.empty:
+            st.info(f"Aucune marque en {year}.")
+        elif not prior:
+            st.caption(f"Pas d'historique avant {year} : distinction impossible.")
+        else:
+            prior_sum = by[prior].sum(axis=1)
+            new_mask = np.array([prior_sum.get(mq, 0) == 0 for mq in now.index])
+            nb_new = int(new_mask.sum())
+            nb_rec = int(len(now) - nb_new)
+            if full:
+                ca_new = int(now[year].values[new_mask].sum())
+                ca_rec = int(now[year].sum() - ca_new)
+                cc = st.columns(4)
+                cc[0].metric("Nouvelles marques", f"{nb_new}")
+                cc[1].metric("CA nouvelles", eur(ca_new))
+                cc[2].metric("Marques récurrentes", f"{nb_rec}")
+                cc[3].metric("CA récurrentes", eur(ca_rec))
+            else:
+                cc = st.columns(2)
+                cc[0].metric("Nouvelles marques", f"{nb_new}")
+                cc[1].metric("Marques récurrentes", f"{nb_rec}")
+            new_list = now[new_mask].sort_values(year, ascending=False)
+            if not new_list.empty:
+                st.caption("Nouvelles marques acquises cette année :")
+                if full:
+                    nl = pd.DataFrame({"Marque": new_list.index, f"CA {year}": new_list[year].astype(int)})
+                    st.dataframe(nl, hide_index=True, width="stretch",
+                                 column_config={f"CA {year}": st.column_config.NumberColumn(format="%d €")})
+                else:
+                    st.dataframe(pd.DataFrame({"Marque": new_list.index}), hide_index=True, width="stretch")
+
 with tab_talents:
     st.subheader(f"Talents actifs — {year}")
     t = data["talents"]
@@ -529,82 +655,61 @@ with tab_talents:
     else:
         inactifs = load_inactifs()
         low = {x.lower() for x in inactifs}
-
-        with st.expander("\u2699\uFE0F G\u00e9rer les cr\u00e9ateurs (retirer / r\u00e9activer)"):
-            all_names = sorted(data["talents"]["name"].unique())
-            choix = [n for n in all_names if n.lower() not in low]
-            a_retirer = st.multiselect(
-                "Retirer des cr\u00e9ateurs partis (ils dispara\u00eetront du dashboard)", choix)
-            if st.button("Retirer d\u00e9finitivement", disabled=not a_retirer):
-                if apply_inactifs(set(inactifs) | set(a_retirer)):
-                    st.rerun()
-            if inactifs:
-                a_reactiver = st.multiselect("R\u00e9activer des cr\u00e9ateurs", sorted(inactifs))
-                if st.button("R\u00e9activer", disabled=not a_reactiver):
-                    if apply_inactifs(set(inactifs) - set(a_reactiver)):
+        if full:
+            with st.expander("⚙️ Gérer les créateurs (retirer / réactiver)"):
+                all_names = sorted(data["talents"]["name"].unique())
+                choix = [n for n in all_names if n.lower() not in low]
+                a_retirer = st.multiselect("Retirer des créateurs partis", choix)
+                if st.button("Retirer définitivement", disabled=not a_retirer):
+                    if apply_inactifs(set(inactifs) | set(a_retirer)):
                         st.rerun()
-                st.caption("Actuellement masqu\u00e9s : " + ", ".join(sorted(inactifs)))
-
+                if inactifs:
+                    a_react = st.multiselect("Réactiver des créateurs", sorted(inactifs))
+                    if st.button("Réactiver", disabled=not a_react):
+                        if apply_inactifs(set(inactifs) - set(a_react)):
+                            st.rerun()
+                    st.caption("Actuellement masqués : " + ", ".join(sorted(inactifs)))
         if low:
             t = t[~(t["name"].str.lower().isin(low) | t["talent"].str.lower().isin(low))]
-
         act = t[t[campsy] > 0].copy()
         if act.empty:
             st.info(f"Aucun talent actif en {year}.")
         else:
             days = act["days_inactive"].astype(int)
             seuil = int(max(45, np.percentile(days, 75))) if len(days) else 45
-
             act["prix_moyen"] = (act[cay] / act[campsy]).round().astype(int)
             act["depuis"] = days
-            act["alerte"] = np.where(days > seuil, "\U0001F534", "")
+            act["alerte"] = np.where(days > seuil, "🔴", "")
             act["derniere"] = pd.to_datetime(act["last_sale"])
-            act = act.sort_values(cay, ascending=False)
-
-            st.altair_chart(bar_sorted(act["name"].head(15), act[cay].head(15)))
-
-            cmax = max(int(act[cay].max()), 1)
-            disp = act[["name", "manager", cay, "prix_moyen", campsy, commy,
-                        "depuis", "alerte", "derniere", "top_brands"]]
-            st.dataframe(
-                disp, hide_index=True, width="stretch",
-                column_config={
+            if full:
+                act = act.sort_values(cay, ascending=False)
+                st.altair_chart(bar_sorted(act["name"].head(15), act[cay].head(15)))
+                cmax = max(int(act[cay].max()), 1)
+                disp = act[["name", "manager", cay, "prix_moyen", campsy, commy,
+                            "depuis", "alerte", "derniere", "top_brands"]]
+                st.dataframe(disp, hide_index=True, width="stretch", column_config={
                     "name": "Talent", "manager": "Manager",
-                    cay: st.column_config.ProgressColumn(
-                        f"CA {year}", format="%d €", min_value=0, max_value=cmax),
+                    cay: st.column_config.ProgressColumn(f"CA {year}", format="%d €", min_value=0, max_value=cmax),
                     "prix_moyen": st.column_config.NumberColumn("Prix moyen", format="%d €"),
                     campsy: "Campagnes",
                     commy: st.column_config.NumberColumn("Commission", format="%d €"),
                     "depuis": st.column_config.NumberColumn("Depuis dern. collab (j)", format="%d j"),
                     "alerte": "⚠️",
                     "derniere": st.column_config.DateColumn("Dernière vente", format="DD/MM/YYYY"),
-                    "top_brands": "Top marques",
-                })
-            st.caption(
-                f"\U0001F534 = pas de collab depuis plus de {seuil} jours "
-                f"(seuil = 75e percentile des délais). "
-                f"Pour retirer un créateur parti, utilise le panneau "
-                f"« \u2699\uFE0F G\u00e9rer les cr\u00e9ateurs » ci-dessus.")
+                    "top_brands": "Top marques"})
+            else:
+                act = act.sort_values(campsy, ascending=False)
+                st.altair_chart(bar_sorted(act["name"].head(15), act[campsy].head(15), ytitle="Campagnes"))
+                disp = act[["name", "manager", campsy, "depuis", "alerte", "derniere", "top_brands"]]
+                st.dataframe(disp, hide_index=True, width="stretch", column_config={
+                    "name": "Talent", "manager": "Manager", campsy: "Campagnes",
+                    "depuis": st.column_config.NumberColumn("Depuis dern. collab (j)", format="%d j"),
+                    "alerte": "⚠️",
+                    "derniere": st.column_config.DateColumn("Dernière vente", format="DD/MM/YYYY"),
+                    "top_brands": "Top marques"})
+            st.caption(f"🔴 = pas de collab depuis plus de {seuil} jours (75e percentile)."
+                       + ("" if full else " Vue restreinte : données financières masquées."))
 
-
-# ------------------------------- Pipeline ---------------------------------- #
-with tab_pipe:
-    st.subheader(f"Pipeline par statut (en €) — {year}")
-    pl = yd["pipeline"]
-    if pl.empty:
-        st.info("Aucune campagne en cours (hors « Fait »).")
-    else:
-        p = pl.reset_index().sort_values("montant", ascending=False)
-        st.metric("Total en pipeline (hors « Fait »)", eur(int(p["montant"].sum())))
-        st.altair_chart(bar_sorted(p["status"], p["montant"]))
-        st.dataframe(
-            p.rename(columns={"status": "Statut", "montant": "Montant", "nb": "Nb campagnes"}),
-            hide_index=True, width="stretch",
-            column_config={"Montant": st.column_config.NumberColumn(format="%d €")})
-        st.caption("Montant de CA à chaque étape non finalisée : visibilité sur le cash à venir.")
-
-
-# ------------------------------- Managers ---------------------------------- #
 with tab_mgr:
     st.subheader(f"Performance par Talent Manager — {year}")
     mg = data["managers"]
@@ -612,10 +717,11 @@ with tab_mgr:
     if mg.empty or cay not in mg.columns:
         st.info("Aucune donnée manager.")
     else:
-        g = mg[mg[campsy] > 0].copy().sort_values(cay, ascending=False)
+        g = mg[mg[campsy] > 0].copy()
         if g.empty:
             st.info(f"Aucun manager actif en {year}.")
-        else:
+        elif full:
+            g = g.sort_values(cay, ascending=False)
             prev_ca = f"ca_{year - 1}"
             if prev_ca in g.columns:
                 g["Évol. CA %"] = pct(g[cay].values, g[prev_ca].values)
@@ -629,71 +735,8 @@ with tab_mgr:
                 cols.append("Évol. CA %")
                 cfg["Évol. CA %"] = st.column_config.NumberColumn(format="%+d%%")
             st.dataframe(g[cols], hide_index=True, width="stretch", column_config=cfg)
-
-
-# --------------------- Marques : dormantes + nouvelles --------------------- #
-with tab_brands:
-    by = data["brand_year"]
-    bl = data["brand_last"]
-
-    st.divider()
-    st.subheader("\U0001F634 Marques à relancer (dormantes)")
-    if by.empty or year not in by.columns:
-        st.info("Pas assez d'historique.")
-    else:
-        prior = [c for c in by.columns if c < year]
-        if not prior:
-            st.info(f"Pas d'année avant {year} pour comparer.")
         else:
-            active_before = by[prior].sum(axis=1) > 0
-            dormant = by[active_before & (by[year] == 0)]
-            if dormant.empty:
-                st.success("Aucune marque dormante 🎉")
-            else:
-                rows = []
-                for marque in dormant.index:
-                    last_y = max([y2 for y2 in prior if by.loc[marque, y2] > 0])
-                    rows.append({"Marque": marque,
-                                 "Dernier budget": int(by.loc[marque, last_y]),
-                                 "Dernière année": int(last_y),
-                                 "Dernière campagne": bl.get(marque)})
-                d = pd.DataFrame(rows).sort_values("Dernier budget", ascending=False)
-                st.caption(f"Actives avant {year}, mais aucune campagne en {year}. "
-                           f"Idéal à brancher sur ton outil de relance e-mail.")
-                st.dataframe(
-                    d, hide_index=True, width="stretch",
-                    column_config={
-                        "Dernier budget": st.column_config.NumberColumn(format="%d €"),
-                        "Dernière campagne": st.column_config.DateColumn(format="DD/MM/YYYY")})
-
-    st.divider()
-    st.subheader("\U0001F195 Nouvelles marques vs récurrentes")
-    if by.empty or year not in by.columns:
-        st.info("Pas de données.")
-    else:
-        prior = [c for c in by.columns if c < year]
-        now = by[by[year] > 0]
-        if now.empty:
-            st.info(f"Aucune marque en {year}.")
-        elif not prior:
-            st.caption(f"Pas d'historique avant {year} : impossible de distinguer "
-                       f"nouvelles et récurrentes cette année-là.")
-        else:
-            prior_sum = by[prior].sum(axis=1)
-            new_mask = np.array([prior_sum.get(mq, 0) == 0 for mq in now.index])
-            nb_new = int(new_mask.sum())
-            nb_rec = int(len(now) - nb_new)
-            ca_new = int(now[year].values[new_mask].sum())
-            ca_rec = int(now[year].sum() - ca_new)
-            cc = st.columns(4)
-            cc[0].metric("Nouvelles marques", f"{nb_new}")
-            cc[1].metric("CA nouvelles", eur(ca_new))
-            cc[2].metric("Marques récurrentes", f"{nb_rec}")
-            cc[3].metric("CA récurrentes", eur(ca_rec))
-            new_list = now[new_mask].sort_values(year, ascending=False)
-            if not new_list.empty:
-                nl = pd.DataFrame({"Marque": new_list.index,
-                                   f"CA {year}": new_list[year].astype(int)})
-                st.caption("Nouvelles marques acquises cette année :")
-                st.dataframe(nl, hide_index=True, width="stretch",
-                             column_config={f"CA {year}": st.column_config.NumberColumn(format="%d €")})
+            g = g.sort_values(campsy, ascending=False)
+            st.altair_chart(bar_sorted(g["manager"], g[campsy], ytitle="Campagnes"))
+            st.dataframe(g[["manager", campsy, taly]], hide_index=True, width="stretch",
+                         column_config={"manager": "Manager", campsy: "Campagnes", taly: "Talents"})
