@@ -371,22 +371,36 @@ with st.sidebar:
 if "full" not in st.session_state:
     st.session_state.full = (not MANAGER_CODE)
 
+# Déverrouillage instantané par lien secret :  ...streamlit.app/?key=LECODE
+if MANAGER_CODE and st.query_params.get("key") == MANAGER_CODE:
+    st.session_state.full = True
+    st.query_params.clear()
+    st.rerun()
+
 import streamlit.components.v1 as components
 components.html(
     """
     <script>
-    const doc = window.parent.document;
-    if (!doc.__grapperUnlock) {
-        doc.__grapperUnlock = true;
-        doc.addEventListener('keydown', function(e){
-            if ((e.metaKey || e.ctrlKey) && (e.key === 'd' || e.key === 'D')) {
+    (function(){
+        function handler(e){
+            if ((e.metaKey || e.ctrlKey) && e.shiftKey &&
+                (e.key === 'u' || e.key === 'U' || e.code === 'KeyU')) {
                 e.preventDefault();
-                const u = new URL(window.parent.location.href);
-                u.searchParams.set('unlock', '1');
-                window.parent.location.href = u.toString();
+                var w = window.parent || window;
+                try {
+                    var u = new URL(w.location.href);
+                    u.searchParams.set('unlock', '1');
+                    w.location.href = u.toString();
+                } catch (err) {
+                    var u2 = new URL(window.location.href);
+                    u2.searchParams.set('unlock', '1');
+                    window.location.href = u2.toString();
+                }
             }
-        });
-    }
+        }
+        try { window.parent.document.addEventListener('keydown', handler, true); } catch (e) {}
+        try { document.addEventListener('keydown', handler, true); } catch (e) {}
+    })();
     </script>
     """, height=0)
 
