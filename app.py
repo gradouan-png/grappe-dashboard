@@ -19,6 +19,7 @@ MONTHS_FR = ["Jan", "Fév", "Mar", "Avr", "Mai", "Jui",
 # =========================== COUCHE DONNEES ================================= #
 SHEET_ID = "12mBncnRBlwWb2HQB-ySbwOtgTYzK8yenLLDsHBb5rX8"
 SHEET_NAME = "Global1"
+BILLING_SHEET_ID = "1pQ2gx6Ge83l-DaxshSzSGGJ9OhBT3k_7v5yzHlxiP94"
 CLEAN_PLATFORMS = ["Tiktok", "IG", "IG reel", "IG Story",
                    "UGC", "Ad Code", "YT Short", "YT Intregration"]
 STATUS_FAIT = "Fait"
@@ -153,6 +154,94 @@ def apply_inactifs(new_names):
     return True
 
 
+def _num_fr(s):
+    s = str(s).strip()
+    if not s:
+        return 0.0
+    s = (s.replace("\u202f", "").replace("\u00a0", "").replace(" ", "")
+           .replace("€", "").replace(",", "."))
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+def _month_year(s):
+    dt = pd.to_datetime(str(s), errors="coerce", dayfirst=True)
+    if pd.isna(dt):
+        return None, None
+    return int(dt.month), int(dt.year)
+
+
+@st.cache_data(ttl=TTL)
+def load_billing():
+    import unicodedata
+
+    def norm(x):
+        return unicodedata.normalize("NFKD", str(x)).encode("ascii", "ignore").decode().lower().strip()
+
+    try:
+        ss = _client().open_by_key(BILLING_SHEET_ID)
+    except Exception:
+        return None
+    out = {"waiting_total": None, "waiting_monthly": {}, "talents_due": None}
+
+    # --- Onglet SL : commissions facturées en attente de paiement ---
+    try:
+        vals = ss.worksheet("SL").get_all_values()
+        hdr = [str(c).strip() for c in vals[0]]
+
+        def hidx(name):
+            for i, h in enumerate(hdr):
+                if h == name:
+                    return i
+            return None
+
+        i_amt = hidx("Benefice")
+        i_stat = hidx("Status")
+        date_idxs = [i for i, h in enumerate(hdr) if h == "Date"]
+        i_date = date_idxs[-1] if date_idxs else None
+        cur_y = date.today().year
+        total = 0.0
+        monthly = {m: 0.0 for m in range(1, 13)}
+        for r in vals[1:]:
+            stat = norm(r[i_stat]) if (i_stat is not None and i_stat < len(r)) else ""
+            if stat == "" or "pay" in stat or "retard" in stat:
+                continue
+            amt = _num_fr(r[i_amt]) if (i_amt is not None and i_amt < len(r)) else 0.0
+            mo, yr = _month_year(r[i_date]) if (i_date is not None and i_date < len(r)) else (None, None)
+            if yr != cur_y:
+                continue
+            total += amt
+            if mo:
+                monthly[mo] += amt
+        out["waiting_total"] = int(round(total))
+        out["waiting_monthly"] = {m: int(round(v)) for m, v in monthly.items()}
+    except Exception:
+        pass
+
+    # --- Onglet Talents : total dû aux talents (colonne H) ---
+    try:
+        vals = ss.worksheet("Talents").get_all_values()
+        hdr = [str(c).strip() for c in vals[0]]
+        i_rem = None
+        for i, h in enumerate(hdr):
+            if "mun" in norm(h) and "alent" in norm(h):
+                i_rem = i
+                break
+        if i_rem is None:
+            i_rem = 7  # colonne H
+        s = 0.0
+        for r in vals[1:]:
+            if i_rem < len(r):
+                s += _num_fr(r[i_rem])
+        out["talents_due"] = int(round(s))
+    except Exception:
+        pass
+
+    return out
+
+
 def _days_in_year(y):
     return pd.Timestamp(year=int(y), month=12, day=31).dayofyear
 
@@ -278,6 +367,8 @@ def compute_all():
     talents = _talents(df, scope, years, today)
     managers = _managers(scope, years)
     vnf_global = int(round(df.loc[df["status"] != STATUS_FAIT, "remun"].sum()))
+    comm_non_facture = int(round(df.loc[df["status"] != STATUS_FAIT, "comm"].sum()))
+    billing = load_billing()
 
     bm = scope[(scope["remun"] > 0) & (scope["marque"] != "")]
     if bm.empty:
@@ -298,6 +389,8 @@ def compute_all():
         "talents": talents,
         "managers": managers,
         "vnf_global": vnf_global,
+        "commNonFacture": comm_non_facture,
+        "billing": billing,
         "brand_year": brand_year,
         "brand_last": brand_last,
     }
@@ -483,9 +576,9 @@ else:
 
 st.divider()
 
-tab_over, tab_comp, tab_pipe, tab_brands, tab_talents, tab_mgr = st.tabs(
+tab_over, tab_comp, tab_pipe, tab_brands, tab_talents, tab_mgr, tab_bill = st.tabs(
     ["📊 Vue d'ensemble", "📈 Comparaison N / N-1", "💼 Pipeline",
-     "🏷️ Marques", "🧑‍🎤 Talents", "👔 Managers"])
+     "🏷️ Marques", "🧑‍🎤 Talents", "👔 Managers", "💰 Facturation"])
 
 with tab_over:
     if full:
@@ -805,3 +898,39 @@ with tab_mgr:
             st.altair_chart(bar_sorted(g["manager"], g[campsy], ytitle="Campagnes"))
             st.dataframe(g[["manager", campsy, taly]], hide_index=True, width="stretch",
                          column_config={"manager": "Manager", campsy: "Campagnes", taly: "Talents"})
+
+
+# ------------------------------- Facturation ------------------------------- #
+with tab_bill:
+    st.subheader("💰 Facturation")
+    if not full:
+        st.info("🔒 Section financière — passe en vue complète (bouton « 🔒 Accès ») pour l'afficher.")
+    else:
+        cc = st.columns(2)
+        cc[0].metric("Commission non facturée (hors « Fait »)", eur(data["commNonFacture"]))
+        b = data.get("billing")
+        if b is None:
+            st.warning("Impossible d'ouvrir le fichier Facturation. Vérifie qu'il est partagé "
+                       "en lecture avec dashboard@grappe-gifting.iam.gserviceaccount.com.")
+        else:
+            if b.get("talents_due") is not None:
+                cc[1].metric("Total dû aux talents", eur(b["talents_due"]))
+            st.divider()
+            if b.get("waiting_total") is None:
+                st.warning("Onglet « SL » illisible — vérifie son nom et les colonnes "
+                           "(Benefice, Status, Date).")
+            else:
+                st.metric(f"Commissions facturées en attente de paiement ({data['current_year']})",
+                          eur(b["waiting_total"]))
+                wm = b.get("waiting_monthly", {})
+                dfm = pd.DataFrame({"month": list(range(1, 13))})
+                dfm["Montant"] = dfm["month"].map(wm).fillna(0).astype(int)
+                st.altair_chart(month_bar(dfm, "Montant", "€ attendus"))
+                dfm["Mois"] = [MONTHS_FR[i - 1] for i in dfm["month"]]
+                total = pd.DataFrame([{"Mois": "TOTAL", "Montant": int(dfm["Montant"].sum())}])
+                show = pd.concat([dfm[["Mois", "Montant"]], total], ignore_index=True)
+                st.dataframe(show, hide_index=True, width="stretch",
+                             column_config={"Montant": st.column_config.NumberColumn(format="%d €")})
+                st.caption("Hypothèses : montant = colonne « Benefice » (SL), date = col. L "
+                           "(paiement prévu), statut en attente = col. K hors « payé »/« retard ». "
+                           "Vérifie les chiffres et dis-moi si une colonne est à changer.")
