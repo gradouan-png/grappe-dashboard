@@ -189,50 +189,53 @@ def load_billing():
     # --- Onglet SL : commissions facturées en attente de paiement ---
     try:
         vals = ss.worksheet("SL").get_all_values()
-        hdr = [str(c).strip() for c in vals[0]]
+        hdr = [norm(c) for c in vals[0]]
 
-        def hidx(name):
+        def find_contains(*keys):
             for i, h in enumerate(hdr):
-                if h == name:
+                if all(kk in h for kk in keys):
                     return i
             return None
 
-        i_amt = hidx("Benefice")
-        i_stat = hidx("Status")
-        date_idxs = [i for i, h in enumerate(hdr) if h == "Date"]
+        i_amt = find_contains("benefice")
+        i_stat = next((i for i, h in enumerate(hdr) if h == "status"), None)
+        date_idxs = [i for i, h in enumerate(hdr) if h == "date"]
         i_date = date_idxs[-1] if date_idxs else None
         cur_y = date.today().year
         total = 0.0
         monthly = {m: 0.0 for m in range(1, 13)}
         for r in vals[1:]:
             stat = norm(r[i_stat]) if (i_stat is not None and i_stat < len(r)) else ""
-            if stat == "" or "pay" in stat or "retard" in stat:
-                continue
+            if "pay" in stat or "retard" in stat:
+                continue  # payé ou en retard -> exclu ; vide = en attente
             amt = _num_fr(r[i_amt]) if (i_amt is not None and i_amt < len(r)) else 0.0
             mo, yr = _month_year(r[i_date]) if (i_date is not None and i_date < len(r)) else (None, None)
-            if yr != cur_y:
+            if yr is not None and yr != cur_y:
                 continue
             total += amt
-            if mo:
+            if mo and yr == cur_y:
                 monthly[mo] += amt
         out["waiting_total"] = int(round(total))
         out["waiting_monthly"] = {m: int(round(v)) for m, v in monthly.items()}
     except Exception:
         pass
 
-    # --- Onglet Talents : total dû aux talents (colonne H) ---
+    # --- Onglet Talents : total dû (col. H) filtré par statut Payé (col. I) ---
     try:
         vals = ss.worksheet("Talents").get_all_values()
-        hdr = [str(c).strip() for c in vals[0]]
-        i_rem = None
-        for i, h in enumerate(hdr):
-            if "mun" in norm(h) and "alent" in norm(h):
-                i_rem = i
-                break
+        hdr = [norm(c) for c in vals[0]]
+        i_rem = next((i for i, h in enumerate(hdr) if "mun" in h and "alent" in h), None)
         if i_rem is None:
             i_rem = 7  # colonne H
+        i_paye = next((i for i, h in enumerate(hdr) if h == "paye"), None)
+        if i_paye is None:
+            i_paye = 8  # colonne I
         s = 0.0
         for r in vals[1:]:
+            stt = norm(r[i_paye]) if i_paye < len(r) else ""
+            awaiting = ("attente" in stt and "facture" in stt) or ("go" in stt and "vire" in stt)
+            if not awaiting:
+                continue
             if i_rem < len(r):
                 s += _num_fr(r[i_rem])
         out["talents_due"] = int(round(s))
